@@ -1,6 +1,35 @@
 #include "telemetry/statistics.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <stdexcept>
+#include <vector>
+
+namespace
+{
+
+double calculate_percentile(
+    const std::vector<double>& sorted_values,
+    double percentile
+)
+{
+    if (sorted_values.empty())
+    {
+        throw std::invalid_argument(
+            "cannot calculate percentile of empty data"
+        );
+    }
+
+    const std::size_t index =
+        static_cast<std::size_t>(
+            std::ceil(percentile * sorted_values.size())
+        ) - 1;
+
+    return sorted_values[index];
+}
+
+} // namespace
+
 
 Statistics calculate_statistics(
     const std::vector<double>& values
@@ -36,7 +65,29 @@ Statistics calculate_statistics(
         sum += value;
     }
 
-    stats.mean = sum / stats.count;
+    stats.mean = sum / static_cast<double>(stats.count);
+
+    std::vector<double> sorted_values = values;
+
+    std::sort(
+        sorted_values.begin(),
+        sorted_values.end()
+    );
+
+    stats.p50 = calculate_percentile(
+        sorted_values,
+        0.50
+    );
+
+    stats.p95 = calculate_percentile(
+        sorted_values,
+        0.95
+    );
+
+    stats.p99 = calculate_percentile(
+        sorted_values,
+        0.99
+    );
 
     return stats;
 }
