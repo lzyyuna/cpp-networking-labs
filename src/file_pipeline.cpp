@@ -1,4 +1,4 @@
-#include "telemetry/pipeline.hpp"
+#include "telemetry/file_pipeline.hpp"
 
 #include "telemetry/bounded_queue.hpp"
 
