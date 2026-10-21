@@ -1,12 +1,15 @@
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+
 #include <winsock2.h>
 #include <windows.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <iomanip>
 #include <iostream>
@@ -16,13 +19,14 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "telemetry/bounded_queue.hpp"
 #include "telemetry/statistics.hpp"
 
-namespace
-{
+namespace {
 
 constexpr int kPort = 9000;
 constexpr std::size_t kQueueCapacity = 64;
@@ -41,7 +45,6 @@ BOOL WINAPI handle_console_event(DWORD event)
         stop_requested->store(true);
         return TRUE;
     }
-
     return FALSE;
 }
 
@@ -52,19 +55,14 @@ public:
     {
         WSADATA wsa{};
         const int result = WSAStartup(MAKEWORD(2, 2), &wsa);
-
         if (result != 0)
         {
             throw std::runtime_error(
-                "WSAStartup failed: " + std::to_string(result)
-            );
+                "WSAStartup failed: " + std::to_string(result));
         }
     }
 
-    ~WinsockRuntime()
-    {
-        WSACleanup();
-    }
+    ~WinsockRuntime() { WSACleanup(); }
 
     WinsockRuntime(const WinsockRuntime&) = delete;
     WinsockRuntime& operator=(const WinsockRuntime&) = delete;
@@ -73,29 +71,21 @@ public:
 class Socket
 {
 public:
-    explicit Socket(SOCKET value)
-        : value_(value)
+    explicit Socket(SOCKET value) : value_(value)
     {
         if (value_ == INVALID_SOCKET)
         {
             throw std::runtime_error(
-                "socket failed: " + std::to_string(WSAGetLastError())
-            );
+                "socket failed: " + std::to_string(WSAGetLastError()));
         }
     }
 
-    ~Socket()
-    {
-        closesocket(value_);
-    }
+    ~Socket() { closesocket(value_); }
 
     Socket(const Socket&) = delete;
     Socket& operator=(const Socket&) = delete;
 
-    SOCKET get() const
-    {
-        return value_;
-    }
+    SOCKET get() const { return value_; }
 
 private:
     SOCKET value_;
@@ -107,7 +97,6 @@ public:
     explicit ConsoleStopHandler(std::atomic<bool>& stop_requested)
     {
         gConsoleStopRequested.store(&stop_requested);
-
         if (!SetConsoleCtrlHandler(handle_console_event, TRUE))
         {
             gConsoleStopRequested.store(nullptr);
@@ -127,35 +116,27 @@ public:
 
 std::chrono::milliseconds parse_duration(const std::string& text)
 {
-    if (text.empty()
-        || text.find_first_not_of("0123456789") != std::string::npos)
+    if (text.empty() ||
+        text.find_first_not_of("0123456789") != std::string::npos)
     {
         throw std::invalid_argument(
-            "duration_ms must be a positive integer"
-        );
+            "duration_ms must be a positive integer");
     }
 
     const unsigned long long value = std::stoull(text);
     const auto maximum = static_cast<unsigned long long>(
-        std::numeric_limits<std::chrono::milliseconds::rep>::max()
-    );
+        std::numeric_limits<std::chrono::milliseconds::rep>::max());
 
     if (value == 0 || value > maximum)
     {
         throw std::invalid_argument(
-            "duration_ms must be a positive integer"
-        );
+            "duration_ms must be a positive integer");
     }
-
     return std::chrono::milliseconds(value);
 }
 
 bool parse_message(
-    const char* data,
-    int length,
-    long long& sequence,
-    double& value
-)
+    const char* data, int length, long long& sequence, double& value)
 {
     const std::string message(data, static_cast<std::size_t>(length));
     std::istringstream input(message);
@@ -195,14 +176,98 @@ void print_statistics(const std::vector<double>& values)
     std::cout << "p99:   " << stats.p99 << '\n';
 }
 
+// Analyze one sender run whose sequence starts from 1.
+// Missing count only covers 1..largest sequence observed.
+void print_sequence_statistics(const std::vector<long long>& arrivals)
+{
+    std::cout << "\n--- UDP Sequence Statistics ---\n";
+
+    if (arrivals.empty())
+    {
+        std::cout << "No valid sequences received.\n";
+        return;
+    }
+
+    std::unordered_set<long long> seen;
+    seen.reserve(arrivals.size());
+
+    std::size_t duplicates = 0;
+    std::size_t out_of_order = 0;
+    long long highest_seen = 0;
+
+    for (long long sequence : arrivals)
+    {
+        if (!seen.insert(sequence).second)
+        {
+            ++duplicates;
+            continue;
+        }
+
+        // Count late-arriving unique packets, not duplicates.
+        if (sequence < highest_seen)
+        {
+            ++out_of_order;
+        }
+
+        highest_seen = std::max(highest_seen, sequence);
+    }
+
+    std::vector<long long> sorted(seen.begin(), seen.end());
+    std::sort(sorted.begin(), sorted.end());
+
+    std::uint64_t missing = 0;
+    long long previous = 0;
+    std::vector<std::pair<long long, long long>> missing_ranges;
+
+    for (long long sequence : sorted)
+    {
+        if (sequence > previous + 1)
+        {
+            missing += static_cast<std::uint64_t>(
+                sequence - previous - 1);
+
+            // Avoid flooding the console with large loss reports.
+            if (missing_ranges.size() < 10)
+            {
+                missing_ranges.emplace_back(
+                    previous + 1, sequence - 1);
+            }
+        }
+        previous = sequence;
+    }
+
+    std::cout << "Valid packets:       " << arrivals.size() << '\n';
+    std::cout << "Unique sequences:    " << seen.size() << '\n';
+    std::cout << "Duplicate packets:   " << duplicates << '\n';
+    std::cout << "Out-of-order packets:" << ' ' << out_of_order << '\n';
+    std::cout << "Highest sequence:    " << highest_seen << '\n';
+    std::cout << "Missing (1..highest):" << ' ' << missing << '\n';
+
+    for (const auto& range : missing_ranges)
+    {
+        std::cout << "Missing range: " << range.first;
+        if (range.first != range.second)
+        {
+            std::cout << "-" << range.second;
+        }
+        std::cout << '\n';
+    }
+
+    if (missing_ranges.size() == 10)
+    {
+        std::cout << "(Missing range display is limited to 10 ranges.)\n";
+    }
+    std::cout << "Note: Missing packets after the highest received "
+                 "sequence cannot be detected here.\n";
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
 {
     if (argc > 2)
     {
-        std::cerr
-            << "Usage: telemetry_udp_receiver [duration_ms]\n";
+        std::cerr << "Usage: telemetry_udp_receiver [duration_ms]\n";
         return 1;
     }
 
@@ -211,47 +276,41 @@ int main(int argc, char* argv[])
         const std::optional<std::chrono::milliseconds> duration =
             argc == 2
                 ? std::optional<std::chrono::milliseconds>(
-                    parse_duration(argv[1])
-                )
+                      parse_duration(argv[1]))
                 : std::nullopt;
 
         WinsockRuntime winsock;
         Socket socket(::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP));
 
         const DWORD timeout = kReceiveTimeoutMs;
-
         if (setsockopt(
-                socket.get(),
-                SOL_SOCKET,
-                SO_RCVTIMEO,
+                socket.get(), SOL_SOCKET, SO_RCVTIMEO,
                 reinterpret_cast<const char*>(&timeout),
-                sizeof(timeout)
-            ) == SOCKET_ERROR)
+                sizeof(timeout)) == SOCKET_ERROR)
         {
             throw std::runtime_error(
-                "setsockopt failed: "
-                + std::to_string(WSAGetLastError())
-            );
+                "setsockopt failed: " + std::to_string(WSAGetLastError()));
         }
 
         sockaddr_in address{};
         address.sin_family = AF_INET;
         address.sin_port = htons(kPort);
-        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_addr.s_addr = htonl(INADDR_ANY);
 
         if (bind(
                 socket.get(),
                 reinterpret_cast<const sockaddr*>(&address),
-                sizeof(address)
-            ) == SOCKET_ERROR)
+                sizeof(address)) == SOCKET_ERROR)
         {
             throw std::runtime_error(
-                "bind failed: " + std::to_string(WSAGetLastError())
-            );
+                "bind failed: " + std::to_string(WSAGetLastError()));
         }
 
         BoundedQueue queue(kQueueCapacity);
         std::vector<double> values;
+        std::vector<long long> received_sequences;
+        received_sequences.reserve(60000);
+
         std::size_t valid_packets = 0;
         std::size_t invalid_packets = 0;
         std::atomic<bool> stop_requested{false};
@@ -260,104 +319,94 @@ int main(int argc, char* argv[])
         std::exception_ptr producer_error;
         std::exception_ptr consumer_error;
 
-        std::thread producer(
-            [&]
+        std::thread producer([&]
+        {
+            try
             {
-                try
+                while (!stop_requested.load())
                 {
-                    while (!stop_requested.load())
+                    char buffer[1024];
+
+                    const int bytes = recvfrom(
+                        socket.get(), buffer,
+                        static_cast<int>(sizeof(buffer)),
+                        0, nullptr, nullptr);
+
+                    if (bytes == SOCKET_ERROR)
                     {
-                        char buffer[1024];
-                        const int bytes = recvfrom(
-                            socket.get(),
-                            buffer,
-                            static_cast<int>(sizeof(buffer)),
-                            0,
-                            nullptr,
-                            nullptr
-                        );
+                        const int error = WSAGetLastError();
 
-                        if (bytes == SOCKET_ERROR)
+                        if (error == WSAETIMEDOUT)
                         {
-                            const int error = WSAGetLastError();
-
-                            if (error == WSAETIMEDOUT)
-                            {
-                                continue;
-                            }
-
-                            if (error == WSAEMSGSIZE)
-                            {
-                                ++invalid_packets;
-                                continue;
-                            }
-
-                            if (stop_requested.load()
-                                && error == WSAEINTR)
-                            {
-                                break;
-                            }
-
-                            throw std::runtime_error(
-                                "recvfrom failed: "
-                                + std::to_string(error)
-                            );
+                            continue;
                         }
 
-                        long long sequence = 0;
-                        double value = 0.0;
-
-                        if (!parse_message(
-                                buffer,
-                                bytes,
-                                sequence,
-                                value
-                            ))
+                        if (error == WSAEMSGSIZE)
                         {
                             ++invalid_packets;
                             continue;
                         }
 
-                        queue.push(value);
-                        ++valid_packets;
+                        if (stop_requested.load() && error == WSAEINTR)
+                        {
+                            break;
+                        }
 
+                        throw std::runtime_error(
+                            "recvfrom failed: " + std::to_string(error));
+                    }
+
+                    long long sequence = 0;
+                    double value = 0.0;
+
+                    if (!parse_message(
+                            buffer, bytes, sequence, value))
+                    {
+                        ++invalid_packets;
+                        continue;
+                    }
+
+                    queue.push(value);
+                    received_sequences.push_back(sequence);
+                    ++valid_packets;
+
+                    if (valid_packets <= 5 || valid_packets % 1000 == 0)
+                    {
                         std::cout << "Received: seq=" << sequence
                                   << ", value=" << value << '\n';
                     }
                 }
-                catch (...)
-                {
-                    producer_error = std::current_exception();
-                    stop_requested.store(true);
-                }
-
-                // Closing wakes the consumer. pop() still drains queued data.
-                queue.close();
             }
-        );
+            catch (...)
+            {
+                producer_error = std::current_exception();
+                stop_requested.store(true);
+            }
+
+            // pop() still drains already queued values after close().
+            queue.close();
+        });
 
         std::thread consumer;
 
         try
         {
-            consumer = std::thread(
-                [&]
+            consumer = std::thread([&]
+            {
+                try
                 {
-                    try
+                    while (const auto value = queue.pop())
                     {
-                        while (const auto value = queue.pop())
-                        {
-                            values.push_back(*value);
-                        }
-                    }
-                    catch (...)
-                    {
-                        consumer_error = std::current_exception();
-                        stop_requested.store(true);
-                        queue.close();
+                        values.push_back(*value);
                     }
                 }
-            );
+                catch (...)
+                {
+                    consumer_error = std::current_exception();
+                    stop_requested.store(true);
+                    queue.close();
+                }
+            });
         }
         catch (...)
         {
@@ -367,7 +416,7 @@ int main(int argc, char* argv[])
             throw;
         }
 
-        std::cout << "UDP receiver started on 127.0.0.1:"
+        std::cout << "UDP receiver started on 0.0.0.0:"
                   << kPort << ". Press Ctrl+C to stop.\n";
 
         const auto start = std::chrono::steady_clock::now();
@@ -382,8 +431,7 @@ int main(int argc, char* argv[])
             }
 
             std::this_thread::sleep_for(
-                std::chrono::milliseconds(25)
-            );
+                std::chrono::milliseconds(25));
         }
 
         producer.join();
@@ -403,6 +451,7 @@ int main(int argc, char* argv[])
         std::cout << "valid: " << valid_packets << '\n';
         std::cout << "invalid: " << invalid_packets << '\n';
         print_statistics(values);
+        print_sequence_statistics(received_sequences);
     }
     catch (const std::exception& error)
     {
