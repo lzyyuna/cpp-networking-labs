@@ -1,0 +1,26 @@
+# CMake build trees and generated files
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Visual Studio / MSVC
+.vs/
+*.sln
+*.vcxproj*
+*.obj
+*.pdb
+*.ilk
+*.exe
+
+# Linux build products
+*.o
+*.out
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
