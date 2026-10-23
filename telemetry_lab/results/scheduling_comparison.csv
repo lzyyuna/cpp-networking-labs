@@ -1,0 +1,8 @@
+pair,policy,sent_packets,received_packets,lost_packets,loss_rate_percent,schedule_misses,max_lateness_us,max_catchup_streak,interval_lt_25_us,out_of_order
+1,catchup,100000,99982,18,0.01800,4,124.856,4,1,0
+1,reset,99995,99979,16,0.01600,3,132.560,0,3,0
+2,catchup,100000,99984,16,0.01600,72,3876.582,45,66,5
+2,reset,99985,99965,20,0.02000,8,451.168,0,15,0
+3,catchup,100000,99990,10,0.01000,2,112.542,3,0,0
+3,reset,99990,99973,17,0.01700,3,640.208,0,0,0
+
