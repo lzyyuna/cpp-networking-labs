@@ -1,0 +1,15 @@
+build/
+build-*/
+.vs/
+out/
+
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+
+*.exe
+*.obj
+*.pdb
+*.ilk
+*.lib
+*.log
